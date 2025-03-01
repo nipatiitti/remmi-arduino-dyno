@@ -13,7 +13,7 @@ PID controller(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 Servo brakeServo;
 
 const int servoMin = 0;
-const int servoMax = 100;  // Increase this to increase servo travel
+const int servoMax = 160;  // Increase this to increase servo travel
 
 const int MOTOR_MAX_RPM = 2000;  // Maximum RPM of the motor
 
@@ -177,6 +177,7 @@ void setup() {
     // initialize the variables we're linked to
     Input = 0;
     Setpoint = 0;
+    controller.SetMode(AUTOMATIC);
 }
 
 void loop() {
@@ -187,14 +188,14 @@ void loop() {
 
     int potValue = analogRead(POT_PIN);
     Setpoint = mapPotValueToRPM(potValue);
-    Input = flywheelRPM;  // TODO: Calculate engine rpm from flywheel sensor
+    Input = flywheelRPM;
     controller.Compute();
 
     static unsigned long lastServoUpdate = 0;
     const unsigned long SERVO_UPDATE_INTERVAL = 100;  // ms between updates
 
     // Map PID output (0-255) to servo position (servoMin-servoMax)
-    int servoPosition = map(Output, 0, 255, servoMin, servoMax);
+    int servoPosition = map(Output, 0, 255, servoMax, servoMin);
     servoPosition = constrain(servoPosition, servoMin, servoMax);
 
     if (millis() - lastServoUpdate > SERVO_UPDATE_INTERVAL) {
@@ -225,6 +226,12 @@ void loop() {
 
         Serial.print(">Servo target:");
         Serial.println(servoPosition);
+
+        Serial.print(">PID Output:");
+        Serial.println(Output);
+
+        Serial.print(">RPM Hall status:");
+        Serial.println(digitalRead(HALL_SENSOR_PIN));
 
         lastPrint = millis();
     }
