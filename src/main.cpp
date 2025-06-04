@@ -24,6 +24,49 @@ double A = 1;     // rpm coefficient
 double B = 1;     // magnet distance coefficient
 double E = -2.0;  // magnet distance exponent0
 
+// Moving average for torque smoothing
+const int TORQUE_MOVING_AVERAGE_SIZE = 100;
+float torqueHistory[TORQUE_MOVING_AVERAGE_SIZE];
+int torqueHistoryIndex = 0;
+bool torqueHistoryFilled = false;
+float torqueSum = 0.0;
+
+// Function to add a new torque value and return the moving average
+float updateTorqueMovingAverage(float newTorque) {
+    // Remove the oldest value from the sum
+    torqueSum -= torqueHistory[torqueHistoryIndex];
+
+    // Add the new value
+    torqueHistory[torqueHistoryIndex] = newTorque;
+    torqueSum += newTorque;
+
+    // Update the index
+    torqueHistoryIndex = (torqueHistoryIndex + 1) % TORQUE_MOVING_AVERAGE_SIZE;
+
+    // Check if we've filled the buffer at least once
+    if (!torqueHistoryFilled && torqueHistoryIndex == 0) {
+        torqueHistoryFilled = true;
+    }
+
+    // Calculate and return the average
+    int count =
+        torqueHistoryFilled ? TORQUE_MOVING_AVERAGE_SIZE : torqueHistoryIndex;
+    return count > 0 ? torqueSum / count : 0.0;
+}
+
+float currentTorqueAverage() {
+    // Calculate the average of the current torque history
+    float sum = 0.0;
+    int count =
+        torqueHistoryFilled ? TORQUE_MOVING_AVERAGE_SIZE : torqueHistoryIndex;
+
+    for (int i = 0; i < count; i++) {
+        sum += torqueHistory[i];
+    }
+
+    return count > 0 ? sum / count : 0.0;
+}
+
 Servo brakeServo;
 
 const int servoMin = 0;
@@ -103,12 +146,12 @@ uint16_t readADC(uint8_t channel) {
 }
 
 // Calculations to move between engine rpm and flywheel rpm
-const int Z_E = 18;       // ENGINE_SPROCKET_TEETH
-const int Z_W = 149;      // REAR_WHEEL_SPROCKET_TEETH
+const float Z_E = 18;     // ENGINE_SPROCKET_TEETH
+const float Z_W = 149;    // REAR_WHEEL_SPROCKET_TEETH
 const float D_W = 480.0;  // mm, diameter REAR_WHEEL_DIA
 const float D_D = 58.0;   // mm, diameter DYNO_ROLL_DIA
-const int Z_DF = 13;      // DYNO_FRONT_SPROCKET_TEETH
-const int Z_DR = 30;      // DYNO_REAR_SPROCKET_TEETH
+const float Z_DF = 13;    // DYNO_FRONT_SPROCKET_TEETH
+const float Z_DR = 30;    // DYNO_REAR_SPROCKET_TEETH
 
 // Total ratio from engine to dyno flywheel
 const float I = Z_E / Z_W * D_W / D_D * Z_DF / Z_DR;
@@ -141,12 +184,9 @@ void hallEffect() {
     }
 }
 
-// Reference values [value, weight in grams]
-const int REFERENCE_VALUES_OLD[10][2] = {
-    {708, 0},    {717, 350},  {725, 700},  {731, 1050}, {737, 1400},
-    {744, 1750}, {750, 2100}, {760, 2450}, {768, 2800}, {797, 4300}};
-
-const int REFERENCE_VALUES[14][2] = {
+// Sensor value / grams reference values
+const int REFERENCE_SIZE = 14;  // Number of reference values
+const int REFERENCE_VALUES[REFERENCE_SIZE][2] = {
     {808, 0},     {838, 350},   {858, 700},   {880, 1050},  {914, 1400},
     {932, 1750},  {957, 2100},  {988, 2450},  {1011, 2800}, {1062, 3150},
     {1084, 3500}, {1120, 3850}, {1153, 4200}, {1180, 4550}};
@@ -159,12 +199,12 @@ float pressureSensorToKG(int pressureSensorValue) {
     }
 
     // Handle case where pressure value is above the maximum reference
-    if (pressureSensorValue >= REFERENCE_VALUES[9][0]) {
-        return REFERENCE_VALUES[9][1];
+    if (pressureSensorValue >= REFERENCE_VALUES[REFERENCE_SIZE - 1][0]) {
+        return REFERENCE_VALUES[REFERENCE_SIZE - 1][1];
     }
 
     int i = 0;
-    while (i < 9 && pressureSensorValue > REFERENCE_VALUES[i][0]) {
+    while (i < REFERENCE_SIZE && pressureSensorValue > REFERENCE_VALUES[i][0]) {
         i++;
     }
 
@@ -212,6 +252,11 @@ void setup() {
     Input = 0;
     Setpoint = 0;
     controller.SetMode(AUTOMATIC);
+
+    // Initialize torque history array
+    for (int i = 0; i < TORQUE_MOVING_AVERAGE_SIZE; i++) {
+        torqueHistory[i] = 0.0;
+    }
 }
 
 void loop() {
@@ -223,7 +268,7 @@ void loop() {
     int potValue = analogRead(POT_PIN);
     Setpoint = mapPotValueToRPM(potValue);
     unsigned long engineRPM = FtoE(flywheelRPM);
-    Input = flywheelRPM;
+    Input = engineRPM;
     controller.Compute();
 
     static unsigned long lastServoUpdate = 0;
@@ -244,16 +289,29 @@ void loop() {
     uint8_t channel = 0;  // Change this to 0-7 to read other channels
     uint16_t value = readADC(channel);
     float pressureKG = pressureSensorToKG(value);
-    float torque =
-        KGtoNM(pressureKG);  // This is used only for future calculations
+    float rawTorque = KGtoNM(pressureKG);  // Raw torque reading
+
+    // Ignore anomalous torque values
+    bool isAnomalous = false;
+    if (rawTorque < 0 || rawTorque > 10000) {
+        isAnomalous =
+            true;  // Ignore negative or excessively high torque values
+    }
+
+    // If the torque is anomalous, use the current average torque
+    float smoothedTorque = isAnomalous ? currentTorqueAverage()
+                                       : updateTorqueMovingAverage(rawTorque);
 
     // DEBUG PRINTS
     // Print every 100ms
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 100) {
         // Data in Teleplotter format
-        Serial.print(">Torque_(Nm):");
-        Serial.println(torque);
+        Serial.print(">Raw_Torque_(Nm):");
+        Serial.println(rawTorque);
+
+        Serial.print(">Smoothed_Torque_(Nm):");
+        Serial.println(smoothedTorque);
 
         Serial.print(">Flywheel_RPM:");
         Serial.println(flywheelRPM);
