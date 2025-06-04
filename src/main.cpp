@@ -3,19 +3,33 @@
 #include <Servo.h>
 #include <Wire.h>
 
+/*
+TODO:
+Kompensointi
+- torque(rpm) = A*rpm
+- torque(d) = B*d*-4
+ */
 double Setpoint, Input, Output;
 
-double Kp = 2;
-double Ki = 5;
-double Kd = 1;
+double Kp = 1;
+double Ki = 1;
+double Kd = 0.1;
 PID controller(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+
+// Anti-nonlinear parameters
+// T = A*rpm + B*d**E
+// double A = 0.0088; // rpm coefficient
+// double B = 170; // magnet distance coefficient
+double A = 1;     // rpm coefficient
+double B = 1;     // magnet distance coefficient
+double E = -2.0;  // magnet distance exponent0
 
 Servo brakeServo;
 
 const int servoMin = 0;
-const int servoMax = 160;  // Increase this to increase servo travel
+const int servoMax = 180;  // Increase this to increase servo travel
 
-const int MOTOR_MAX_RPM = 2000;  // Maximum RPM of the motor
+const int MOTOR_MAX_RPM = 5000;  // Maximum RPM of the motor
 
 // Map the potentiometer value of 0-1023 to a target RPM
 float mapPotValueToRPM(int potValue) {
@@ -88,14 +102,20 @@ uint16_t readADC(uint8_t channel) {
     return adcValue;
 }
 
-/*
-// TODO: Use this only after nowing the correct ratio
-
 // Calculations to move between engine rpm and flywheel rpm
-const float FLYWHEEL_TO_ENGINE_RATIO = 0.5;
-float FtoE(float flywheelRPM) { return flywheelRPM * FLYWHEEL_TO_ENGINE_RATIO; }
-float EtoF(float engineRPM) { return engineRPM / FLYWHEEL_TO_ENGINE_RATIO; }
-*/
+const int Z_E = 18;       // ENGINE_SPROCKET_TEETH
+const int Z_W = 149;      // REAR_WHEEL_SPROCKET_TEETH
+const float D_W = 480.0;  // mm, diameter REAR_WHEEL_DIA
+const float D_D = 58.0;   // mm, diameter DYNO_ROLL_DIA
+const int Z_DF = 13;      // DYNO_FRONT_SPROCKET_TEETH
+const int Z_DR = 30;      // DYNO_REAR_SPROCKET_TEETH
+
+// Total ratio from engine to dyno flywheel
+const float I = Z_E / Z_W * D_W / D_D * Z_DF / Z_DR;
+
+const float FLYWHEEL_TO_ENGINE_RATIO = 0.5;  // Old
+float FtoE(float flywheelRPM) { return flywheelRPM / I; }
+float EtoF(float engineRPM) { return engineRPM * I; }
 
 // Interrupt variables must be volatile
 const unsigned long DEBOUNCE_TIME = 2000;  // 2ms in microseconds
@@ -122,9 +142,14 @@ void hallEffect() {
 }
 
 // Reference values [value, weight in grams]
-const int REFERENCE_VALUES[10][2] = {
+const int REFERENCE_VALUES_OLD[10][2] = {
     {708, 0},    {717, 350},  {725, 700},  {731, 1050}, {737, 1400},
     {744, 1750}, {750, 2100}, {760, 2450}, {768, 2800}, {797, 4300}};
+
+const int REFERENCE_VALUES[14][2] = {
+    {808, 0},     {838, 350},   {858, 700},   {880, 1050},  {914, 1400},
+    {932, 1750},  {957, 2100},  {988, 2450},  {1011, 2800}, {1062, 3150},
+    {1084, 3500}, {1120, 3850}, {1153, 4200}, {1180, 4550}};
 
 // Linear interpolation
 float pressureSensorToKG(int pressureSensorValue) {
@@ -159,8 +184,17 @@ float KGtoNM(float kg) {
     return newtons * L;  // Nm
 }
 
+double anti_nonlinearize(double cmd, double rpm = 1) {
+    double u = 255 * A * rpm * B * pow((cmd / 255), (1 / E));
+    if (u > 2000) {
+        u = 2000;
+    }
+    // Serial.println(u);
+    return u;
+}
+
 void setup() {
-    Serial.begin(9600);
+    Serial.begin(115200);
     Wire.begin();  // Initialize I2C bus (works for Arduino Leonardo)
 
     pinMode(POT_PIN, INPUT);
@@ -188,14 +222,17 @@ void loop() {
 
     int potValue = analogRead(POT_PIN);
     Setpoint = mapPotValueToRPM(potValue);
+    unsigned long engineRPM = FtoE(flywheelRPM);
     Input = flywheelRPM;
     controller.Compute();
 
     static unsigned long lastServoUpdate = 0;
-    const unsigned long SERVO_UPDATE_INTERVAL = 100;  // ms between updates
+    const unsigned long SERVO_UPDATE_INTERVAL =
+        100;  // ms between updates // 10 Hz
 
     // Map PID output (0-255) to servo position (servoMin-servoMax)
-    int servoPosition = map(Output, 0, 255, servoMax, servoMin);
+    // double cmd = anti_nonlinearize(Output);
+    int servoPosition = map(Output, 0, 255, servoMax, servoMin);  // 0-255 cmd
     servoPosition = constrain(servoPosition, servoMin, servoMax);
 
     if (millis() - lastServoUpdate > SERVO_UPDATE_INTERVAL) {
@@ -215,22 +252,25 @@ void loop() {
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 100) {
         // Data in Teleplotter format
-        Serial.print(">Torque (Nm):");
+        Serial.print(">Torque_(Nm):");
         Serial.println(torque);
 
-        Serial.print(">Flywheel RPM:");
+        Serial.print(">Flywheel_RPM:");
         Serial.println(flywheelRPM);
 
-        Serial.print(">RPM Target:");
+        Serial.print(">Engine_RPM:");
+        Serial.println(engineRPM);
+
+        Serial.print(">RPM_Target:");
         Serial.println(Setpoint);
 
-        Serial.print(">Servo target:");
+        Serial.print(">Servo_target:");
         Serial.println(servoPosition);
 
-        Serial.print(">PID Output:");
+        Serial.print(">PID_Output:");
         Serial.println(Output);
 
-        Serial.print(">RPM Hall status:");
+        Serial.print(">RPM_Hall_status:");
         Serial.println(digitalRead(HALL_SENSOR_PIN));
 
         lastPrint = millis();
