@@ -31,6 +31,11 @@ int torqueHistoryIndex = 0;
 bool torqueHistoryFilled = false;
 float torqueSum = 0.0;
 
+// Low-pass filter for torque sensor - removes high-frequency noise only
+float lowPassFilteredTorque = 0.0;
+const float LOW_PASS_ALPHA =
+    0.2;  // Adjust this value (0.1-0.5) for noise filtering strength
+
 // Function to add a new torque value and return the moving average
 float updateTorqueMovingAverage(float newTorque) {
     // Remove the oldest value from the sum
@@ -145,6 +150,14 @@ uint16_t readADC(uint8_t channel) {
     return adcValue;
 }
 
+// Simple low-pass filter function - removes high-frequency noise only
+float applyLowPassFilter(float rawTorque) {
+    // Low-pass filter using exponential moving average
+    lowPassFilteredTorque = LOW_PASS_ALPHA * rawTorque +
+                            (1.0 - LOW_PASS_ALPHA) * lowPassFilteredTorque;
+    return lowPassFilteredTorque;
+}
+
 // Calculations to move between engine rpm and flywheel rpm
 const float Z_E = 18;     // ENGINE_SPROCKET_TEETH
 const float Z_W = 149;    // REAR_WHEEL_SPROCKET_TEETH
@@ -257,6 +270,9 @@ void setup() {
     for (int i = 0; i < TORQUE_MOVING_AVERAGE_SIZE; i++) {
         torqueHistory[i] = 0.0;
     }
+
+    // Initialize low-pass filter variable
+    lowPassFilteredTorque = 0.0;
 }
 
 void loop() {
@@ -291,16 +307,20 @@ void loop() {
     float pressureKG = pressureSensorToKG(value);
     float rawTorque = KGtoNM(pressureKG);  // Raw torque reading
 
-    // Ignore anomalous torque values
+    // Apply low-pass filter to remove high-frequency noise
+    float filteredTorque = applyLowPassFilter(rawTorque);
+
+    // Ignore anomalous torque values (check both raw and filtered values)
     bool isAnomalous = false;
-    if (rawTorque < 0 || rawTorque > 10000) {
-        isAnomalous =
-            true;  // Ignore negative or excessively high torque values
+    if (rawTorque < 0 || rawTorque > 10000 || abs(filteredTorque) > 1000) {
+        isAnomalous = true;  // Ignore negative, excessively high, or anomalous
+                             // filtered values
     }
 
     // If the torque is anomalous, use the current average torque
-    float smoothedTorque = isAnomalous ? currentTorqueAverage()
-                                       : updateTorqueMovingAverage(rawTorque);
+    float smoothedTorque = isAnomalous
+                               ? currentTorqueAverage()
+                               : updateTorqueMovingAverage(filteredTorque);
 
     // DEBUG PRINTS
     // Print every 100ms
@@ -309,6 +329,9 @@ void loop() {
         // Data in Teleplotter format
         Serial.print(">Raw_Torque_(Nm):");
         Serial.println(rawTorque);
+
+        Serial.print(">Filtered_Torque_(Nm):");
+        Serial.println(filteredTorque);
 
         Serial.print(">Smoothed_Torque_(Nm):");
         Serial.println(smoothedTorque);
