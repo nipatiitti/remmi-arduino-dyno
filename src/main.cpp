@@ -24,54 +24,6 @@ double A = 1;     // rpm coefficient
 double B = 1;     // magnet distance coefficient
 double E = -2.0;  // magnet distance exponent0
 
-// Moving average for torque smoothing
-const int TORQUE_MOVING_AVERAGE_SIZE = 100;
-float torqueHistory[TORQUE_MOVING_AVERAGE_SIZE];
-int torqueHistoryIndex = 0;
-bool torqueHistoryFilled = false;
-float torqueSum = 0.0;
-
-// Low-pass filter for torque sensor - removes high-frequency noise only
-float lowPassFilteredTorque = 0.0;
-const float LOW_PASS_ALPHA =
-    0.2;  // Adjust this value (0.1-0.5) for noise filtering strength
-
-// Function to add a new torque value and return the moving average
-float updateTorqueMovingAverage(float newTorque) {
-    // Remove the oldest value from the sum
-    torqueSum -= torqueHistory[torqueHistoryIndex];
-
-    // Add the new value
-    torqueHistory[torqueHistoryIndex] = newTorque;
-    torqueSum += newTorque;
-
-    // Update the index
-    torqueHistoryIndex = (torqueHistoryIndex + 1) % TORQUE_MOVING_AVERAGE_SIZE;
-
-    // Check if we've filled the buffer at least once
-    if (!torqueHistoryFilled && torqueHistoryIndex == 0) {
-        torqueHistoryFilled = true;
-    }
-
-    // Calculate and return the average
-    int count =
-        torqueHistoryFilled ? TORQUE_MOVING_AVERAGE_SIZE : torqueHistoryIndex;
-    return count > 0 ? torqueSum / count : 0.0;
-}
-
-float currentTorqueAverage() {
-    // Calculate the average of the current torque history
-    float sum = 0.0;
-    int count =
-        torqueHistoryFilled ? TORQUE_MOVING_AVERAGE_SIZE : torqueHistoryIndex;
-
-    for (int i = 0; i < count; i++) {
-        sum += torqueHistory[i];
-    }
-
-    return count > 0 ? sum / count : 0.0;
-}
-
 Servo brakeServo;
 
 const int servoMin = 0;
@@ -150,14 +102,6 @@ uint16_t readADC(uint8_t channel) {
     return adcValue;
 }
 
-// Simple low-pass filter function - removes high-frequency noise only
-float applyLowPassFilter(float rawTorque) {
-    // Low-pass filter using exponential moving average
-    lowPassFilteredTorque = LOW_PASS_ALPHA * rawTorque +
-                            (1.0 - LOW_PASS_ALPHA) * lowPassFilteredTorque;
-    return lowPassFilteredTorque;
-}
-
 // Calculations to move between engine rpm and flywheel rpm
 const float Z_E = 18;     // ENGINE_SPROCKET_TEETH
 const float Z_W = 149;    // REAR_WHEEL_SPROCKET_TEETH
@@ -197,9 +141,8 @@ void hallEffect() {
     }
 }
 
-// Sensor value / grams reference values
-const int REFERENCE_SIZE = 14;  // Number of reference values
-const int REFERENCE_VALUES[REFERENCE_SIZE][2] = {
+const int REFERENCES = 14;
+const int REFERENCE_VALUES[REFERENCES][2] = {
     {808, 0},     {838, 350},   {858, 700},   {880, 1050},  {914, 1400},
     {932, 1750},  {957, 2100},  {988, 2450},  {1011, 2800}, {1062, 3150},
     {1084, 3500}, {1120, 3850}, {1153, 4200}, {1180, 4550}};
@@ -208,16 +151,16 @@ const int REFERENCE_VALUES[REFERENCE_SIZE][2] = {
 float pressureSensorToKG(int pressureSensorValue) {
     // Handle case where pressure value is below the minimum reference
     if (pressureSensorValue <= REFERENCE_VALUES[0][0]) {
-        return REFERENCE_VALUES[0][1];
+        return REFERENCE_VALUES[0][1] / 1000.0;
     }
 
     // Handle case where pressure value is above the maximum reference
-    if (pressureSensorValue >= REFERENCE_VALUES[REFERENCE_SIZE - 1][0]) {
-        return REFERENCE_VALUES[REFERENCE_SIZE - 1][1];
+    if (pressureSensorValue >= REFERENCE_VALUES[13][0]) {
+        return REFERENCE_VALUES[13][1] / 1000.0;
     }
 
     int i = 0;
-    while (i < REFERENCE_SIZE && pressureSensorValue > REFERENCE_VALUES[i][0]) {
+    while (i < REFERENCES - 1 && pressureSensorValue > REFERENCE_VALUES[i][0]) {
         i++;
     }
 
@@ -261,18 +204,14 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(HALL_SENSOR_PIN), hallEffect,
                     FALLING);
 
+    // Print engine to flywheel ratio
+    Serial.print("Engine to flywheel ratio: ");
+    Serial.println(I);
+
     // initialize the variables we're linked to
     Input = 0;
     Setpoint = 0;
     controller.SetMode(AUTOMATIC);
-
-    // Initialize torque history array
-    for (int i = 0; i < TORQUE_MOVING_AVERAGE_SIZE; i++) {
-        torqueHistory[i] = 0.0;
-    }
-
-    // Initialize low-pass filter variable
-    lowPassFilteredTorque = 0.0;
 }
 
 void loop() {
@@ -283,6 +222,7 @@ void loop() {
 
     int potValue = analogRead(POT_PIN);
     Setpoint = mapPotValueToRPM(potValue);
+
     unsigned long engineRPM = FtoE(flywheelRPM);
     Input = engineRPM;
     controller.Compute();
@@ -293,7 +233,7 @@ void loop() {
 
     // Map PID output (0-255) to servo position (servoMin-servoMax)
     // double cmd = anti_nonlinearize(Output);
-    int servoPosition = map(Output, 0, 255, servoMax, servoMin);  // 0-255 cmd
+    int servoPosition = map(Output, 0, 255, servoMin, servoMax);  // 0-255 cmd
     servoPosition = constrain(servoPosition, servoMin, servoMax);
 
     if (millis() - lastServoUpdate > SERVO_UPDATE_INTERVAL) {
@@ -305,36 +245,16 @@ void loop() {
     uint8_t channel = 0;  // Change this to 0-7 to read other channels
     uint16_t value = readADC(channel);
     float pressureKG = pressureSensorToKG(value);
-    float rawTorque = KGtoNM(pressureKG);  // Raw torque reading
-
-    // Apply low-pass filter to remove high-frequency noise
-    float filteredTorque = applyLowPassFilter(rawTorque);
-
-    // Ignore anomalous torque values (check both raw and filtered values)
-    bool isAnomalous = false;
-    if (rawTorque < 0 || rawTorque > 10000 || abs(filteredTorque) > 1000) {
-        isAnomalous = true;  // Ignore negative, excessively high, or anomalous
-                             // filtered values
-    }
-
-    // If the torque is anomalous, use the current average torque
-    float smoothedTorque = isAnomalous
-                               ? currentTorqueAverage()
-                               : updateTorqueMovingAverage(filteredTorque);
+    float torque =
+        KGtoNM(pressureKG);  // This is used only for future calculations
 
     // DEBUG PRINTS
     // Print every 100ms
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 100) {
         // Data in Teleplotter format
-        Serial.print(">Raw_Torque_(Nm):");
-        Serial.println(rawTorque);
-
-        Serial.print(">Filtered_Torque_(Nm):");
-        Serial.println(filteredTorque);
-
-        Serial.print(">Smoothed_Torque_(Nm):");
-        Serial.println(smoothedTorque);
+        Serial.print(">Torque_(Nm):");
+        Serial.println(torque);
 
         Serial.print(">Flywheel_RPM:");
         Serial.println(flywheelRPM);
@@ -353,6 +273,9 @@ void loop() {
 
         Serial.print(">RPM_Hall_status:");
         Serial.println(digitalRead(HALL_SENSOR_PIN));
+
+        Serial.print(">ADC:");
+        Serial.println(value);
 
         lastPrint = millis();
     }
