@@ -192,6 +192,11 @@ float KGtoNM(float kg) {
     return newtons * L;  // Nm
 }
 
+float forceAtRoller(float torque_at_flywheel) {
+    float torque_at_roller = Z_DF/Z_DR * torque_at_flywheel;
+    return torque_at_roller / (D_D/1000.0); // Force in newtons
+}
+
 double anti_nonlinearize(double cmd, double rpm = 1) {
     double u = 255 * A * rpm * B * pow((cmd / 255), (1 / E));
     if (u > 2000) {
@@ -338,7 +343,7 @@ void loop() {
     // CAN Bus transmission
     static unsigned long lastCANUpdate = 0;
     if (canInitialized && millis() - lastCANUpdate > CAN_BUS_UPDATE_INTERVAL) {
-        float forceNewtons = torque / WHEEL_RADIUS_M;
+        float forceNewtons = forceAtRoller(torque);
 
         // Prepare CAN message data (8 bytes)
         // Byte 0-1: Engine RPM (uint16_t, 0-65535 RPM)
