@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <PID_v1.h>
+#include <SPI.h>
 #include <Servo.h>
 #include <Wire.h>
+#include <mcp_canbus.h>
 
 /*
 TODO:
@@ -44,6 +46,12 @@ const int SERVO_PIN = 4;                 // Digital pin 4
 const int PRESSURE_SENSOR_AMP_PIN = A3;  // Analog pin A3
 
 const unsigned long TIMEOUT = 2 * 1000000;  // 2 seconds in microseconds
+
+// Serial target RPM override
+float serialTargetRPM = -1;  // -1 means no override, use potentiometer
+unsigned long lastSerialTargetTime = 0;
+const unsigned long SERIAL_TARGET_TIMEOUT =
+    10000;  // 10 seconds in milliseconds
 
 #define ADC_ADDR 0x48  // 7-bit I2C address (0x90 >> 1)
 
@@ -109,6 +117,10 @@ const float D_W = 480.0;  // mm, diameter REAR_WHEEL_DIA
 const float D_D = 58.0;   // mm, diameter DYNO_ROLL_DIA
 const float Z_DF = 13;    // DYNO_FRONT_SPROCKET_TEETH
 const float Z_DR = 30;    // DYNO_REAR_SPROCKET_TEETH
+
+// Wheel parameters for force calculation
+const float WHEEL_RADIUS_M =
+    D_W / 2000.0;  // Convert wheel diameter from mm to radius in meters
 
 // Total ratio from engine to dyno flywheel
 const float I = Z_E / Z_W * D_W / D_D * Z_DF / Z_DR;
@@ -189,8 +201,28 @@ double anti_nonlinearize(double cmd, double rpm = 1) {
     return u;
 }
 
+// CAN bus stuff
+/*
+   Arduino Leonardo SPI CS Pin - you can use any digital pin
+   Using pin 9 as it's the standard SPI CS pin
+   If pin 9 doesn't work, try: 10, 8, 7, 6, 5, 4, 3, 2
+   Leonardo SPI pins (fixed):
+   - MOSI: Pin 16 (ICSP-4)
+   - MISO: Pin 14 (ICSP-1)
+   - SCK:  Pin 15 (ICSP-3)
+   - CS:   Any digital pin (currently pin 9)
+*/
+#define SPI_CS_PIN 10
+MCP_CAN CAN(SPI_CS_PIN);       // Set CS pin
+uint32_t CAN_SEND_ID = 0x300;  // 768 decimal - fits in 11-bit Standard CAN
+const int CAN_BUS_UPDATE_INTERVAL = 100;  // ms between CAN bus updates // 10 Hz
+bool canInitialized = false;              // Track CAN initialization status
+
 void setup() {
     Serial.begin(115200);
+    while (!Serial);  // Wait for serial port to connect. Needed for native USB
+                      // in Leonardo
+
     Wire.begin();  // Initialize I2C bus (works for Arduino Leonardo)
 
     pinMode(POT_PIN, INPUT);
@@ -212,16 +244,71 @@ void setup() {
     Input = 0;
     Setpoint = 0;
     controller.SetMode(AUTOMATIC);
+
+    // CAN Bus stuff
+    Serial.println("Starting CAN Bus initialization...");
+    Serial.print("CAN CS Pin: ");
+    Serial.println(SPI_CS_PIN);
+
+    int initAttempts = 0;
+    const int MAX_INIT_ATTEMPTS = 10;
+
+    while (CAN_OK != CAN.begin(CAN_1000KBPS) &&
+           initAttempts < MAX_INIT_ATTEMPTS) {
+        initAttempts++;
+        Serial.print("CAN BUS Shield init fail - Attempt ");
+        Serial.print(initAttempts);
+        Serial.print("/");
+        Serial.println(MAX_INIT_ATTEMPTS);
+        delay(500);
+    }
+
+    if (initAttempts >= MAX_INIT_ATTEMPTS) {
+        Serial.println(
+            "ERROR: CAN Bus initialization failed after maximum attempts!");
+        Serial.println(
+            "Hardware issue detected - continuing without CAN "
+            "functionality...");
+        canInitialized = false;
+    } else {
+        Serial.println("CAN BUS Shield init ok!");
+        canInitialized = true;
+    }
 }
 
 void loop() {
+    // Check for serial input for target RPM override
+    if (Serial.available() > 0) {
+        String input = Serial.readStringUntil('\n');
+        input.trim();  // Remove whitespace and newline characters
+
+        float receivedRPM = input.toFloat();
+        if (receivedRPM > 0 && receivedRPM <= MOTOR_MAX_RPM) {
+            serialTargetRPM = receivedRPM;
+            lastSerialTargetTime = millis();
+        }
+    }
+
+    // Check if serial target RPM has expired
+    if (serialTargetRPM > 0 &&
+        (millis() - lastSerialTargetTime > SERIAL_TARGET_TIMEOUT)) {
+        serialTargetRPM = -1;  // Reset to use potentiometer
+    }
+
     // Check if wheel has stopped (no pulses for TIMEOUT period)
     if (micros() - lastPulseTime > TIMEOUT) {
         flywheelRPM = 0;
     }
 
-    int potValue = analogRead(POT_PIN);
-    Setpoint = mapPotValueToRPM(potValue);
+    // Determine target RPM source
+    if (serialTargetRPM > 0) {
+        // Use serial override value
+        Setpoint = serialTargetRPM;
+    } else {
+        // Default to potentiometer value
+        int potValue = analogRead(POT_PIN);
+        Setpoint = mapPotValueToRPM(potValue);
+    }
 
     unsigned long engineRPM = FtoE(flywheelRPM);
     Input = engineRPM;
@@ -248,8 +335,55 @@ void loop() {
     float torque =
         KGtoNM(pressureKG);  // This is used only for future calculations
 
-    // DEBUG PRINTS
-    // Print every 100ms
+    // CAN Bus transmission
+    static unsigned long lastCANUpdate = 0;
+    if (canInitialized && millis() - lastCANUpdate > CAN_BUS_UPDATE_INTERVAL) {
+        float forceNewtons = torque / WHEEL_RADIUS_M;
+
+        // Prepare CAN message data (8 bytes)
+        // Byte 0-1: Engine RPM (uint16_t, 0-65535 RPM)
+        // Byte 2-3: Torque in cNm (uint16_t, centinewton-meters, 0-655.35 Nm)
+        // Byte 4-5: Force in cN (uint16_t, centinewtons, 0-655.35 N)
+        // Byte 6: Servo position (uint8_t, 0-255)
+        // Byte 7: Status flags (uint8_t, bit flags)
+        unsigned char canData[8] = {0};
+
+        // Pack Engine RPM (bytes 0-1) - Big-endian format for MoTeC
+        uint16_t rpmData = constrain(engineRPM, 0, 65535);
+        canData[0] = (rpmData >> 8) & 0xFF;  // MSB first
+        canData[1] = rpmData & 0xFF;         // LSB second
+
+        // Pack Torque in centinewton-meters (bytes 2-3) - Big-endian
+        uint16_t torqueData = constrain(torque * 100, 0, 65535);
+        canData[2] = (torqueData >> 8) & 0xFF;  // MSB first
+        canData[3] = torqueData & 0xFF;         // LSB second
+
+        // Pack Force in centinewtons (bytes 4-5) - Big-endian
+        uint16_t forceData = constrain(forceNewtons * 100, 0, 65535);
+        canData[4] = (forceData >> 8) & 0xFF;  // MSB first
+        canData[5] = forceData & 0xFF;         // LSB second
+
+        // Pack Servo position (byte 6)
+        canData[6] = constrain(servoPosition, 0, 255);
+
+        // Pack Status flags (byte 7)
+        uint8_t statusFlags = 0;
+        if (canInitialized) statusFlags |= (1 << 0);  // Bit 0: CAN initialized
+        if (digitalRead(HALL_SENSOR_PIN) == LOW)
+            statusFlags |= (1 << 1);  // Bit 1: Hall sensor active
+        if (serialTargetRPM > 0)
+            statusFlags |= (1 << 2);  // Bit 2: RPM source (1=serial, 0=pot)
+        if (controller.GetMode() == AUTOMATIC)
+            statusFlags |= (1 << 3);  // Bit 3: PID active
+        canData[7] = statusFlags;
+
+        // Send standard CAN frame
+        CAN.sendMsgBuf(CAN_SEND_ID, 0, 8, canData);
+
+        lastCANUpdate = millis();
+    }
+
+    // Send to serial every 100ms
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 100) {
         // Data in Teleplotter format
@@ -265,17 +399,23 @@ void loop() {
         Serial.print(">RPM_Target:");
         Serial.println(Setpoint);
 
-        Serial.print(">Servo_target:");
-        Serial.println(servoPosition);
-
-        Serial.print(">PID_Output:");
-        Serial.println(Output);
-
-        Serial.print(">RPM_Hall_status:");
-        Serial.println(digitalRead(HALL_SENSOR_PIN));
-
         Serial.print(">ADC:");
         Serial.println(value);
+
+        // Display comprehensive CAN data being sent
+        float forceNewtons = torque / WHEEL_RADIUS_M;
+
+        Serial.print(">CAN_RPM:");
+        Serial.println(engineRPM);
+
+        Serial.print(">CAN_Torque_(cNm):");
+        Serial.println(torque * 100);
+
+        Serial.print(">CAN_Force_(cN):");
+        Serial.println(forceNewtons * 100);
+
+        Serial.print(">CAN_Servo_Pos:");
+        Serial.println(servoPosition);
 
         lastPrint = millis();
     }

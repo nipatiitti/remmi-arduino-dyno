@@ -1,0 +1,82 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: Arduino_Dyno MoTeC_M1 ECU
+
+
+BO_ 768 Dyno_Data: 8 Arduino_Dyno
+ SG_ Engine_RPM : 7|16@0+ (1,0) [0|65535] "rpm" MoTeC_M1,ECU
+ SG_ Torque : 23|16@0+ (0.01,0) [0|655.35] "Nm" MoTeC_M1,ECU
+ SG_ Force : 39|16@0+ (0.01,0) [0|655.35] "N" MoTeC_M1,ECU
+ SG_ Servo_Position : 55|8@0+ (0.392157,0) [0|100] "%" MoTeC_M1,ECU
+ SG_ CAN_Initialized : 63|1@0+ (1,0) [0|1] "" MoTeC_M1,ECU
+ SG_ Hall_Sensor_Active : 62|1@0+ (1,0) [0|1] "" MoTeC_M1,ECU
+ SG_ RPM_Source_Serial : 61|1@0+ (1,0) [0|1] "" MoTeC_M1,ECU
+ SG_ PID_Active : 60|1@0+ (1,0) [0|1] "" MoTeC_M1,ECU
+ SG_ Status_Reserved : 59|4@0+ (1,0) [0|15] "" MoTeC_M1,ECU
+
+
+CM_ BU_ Arduino_Dyno "Arduino-based engine dynamometer controller";
+CM_ BU_ MoTeC_M1 "MoTeC M1 Engine Control Unit";
+CM_ BU_ ECU "Generic Engine Control Unit";
+
+CM_ BO_ 768 "Dyno telemetry data transmitted at 10Hz containing engine RPM, torque, force measurements, brake servo position and system status flags";
+
+CM_ SG_ 768 Engine_RPM "Engine RPM measured from flywheel via hall sensor with gear ratio compensation";
+CM_ SG_ 768 Torque "Engine torque calculated from load cell pressure sensor measurement in Newton-meters";
+CM_ SG_ 768 Force "Applied force calculated from torque divided by wheel radius in Newtons";
+CM_ SG_ 768 Servo_Position "Brake servo position as percentage of full travel (0-100%)";
+CM_ SG_ 768 CAN_Initialized "CAN bus initialization status: 0=Failed, 1=OK";
+CM_ SG_ 768 Hall_Sensor_Active "Hall sensor signal status: 0=No signal, 1=Active";
+CM_ SG_ 768 RPM_Source_Serial "RPM target source: 0=Potentiometer, 1=Serial override";
+CM_ SG_ 768 PID_Active "PID controller status: 0=Manual, 1=Automatic";
+CM_ SG_ 768 Status_Reserved "Reserved status bits for future use";
+
+BA_DEF_ "BusType" STRING ;
+BA_DEF_ "ProtocolType" STRING ;
+BA_DEF_ "DatabaseVersion" STRING ;
+BA_DEF_ "DBName" STRING ;
+
+BA_DEF_DEF_ "BusType" "CAN";
+BA_DEF_DEF_ "ProtocolType" "Standard";
+BA_DEF_DEF_ "DatabaseVersion" "1.0";
+BA_DEF_DEF_ "DBName" "Arduino_Dyno";
+
+BA_ "DBName" "Arduino_Dyno_Database";
+BA_ "DatabaseVersion" "1.0";
+BA_ "BusType" "CAN";
+BA_ "ProtocolType" "Standard";
+
+VAL_ 768 CAN_Initialized 0 "Failed" 1 "OK";
+VAL_ 768 Hall_Sensor_Active 0 "No_Signal" 1 "Active";
+VAL_ 768 RPM_Source_Serial 0 "Potentiometer" 1 "Serial_Override";
+VAL_ 768 PID_Active 0 "Manual" 1 "Automatic";
