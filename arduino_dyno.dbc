@@ -44,12 +44,20 @@ BO_ 768 Dyno_Data: 8 Arduino_Dyno
  SG_ PID_Active : 60|1@0+ (1,0) [0|1] "" MoTeC_M1,ECU
  SG_ Status_Reserved : 59|4@0+ (1,0) [0|15] "" MoTeC_M1,ECU
 
+BO_ 769 Optical_Dyno_Data: 8 Arduino_Dyno
+ SG_ Rear_Wheel_Torque : 7|16@0+ (0.01,0) [0|655.35] "Nm" MoTeC_M1,ECU
+ SG_ Rear_Wheel_RPM : 23|16@0+ (1,0) [0|65535] "rpm" MoTeC_M1,ECU
+ SG_ Roller_RPM : 39|16@0+ (1,0) [0|65535] "rpm" MoTeC_M1,ECU
+ SG_ Angular_Acceleration : 55|16@0+ (0.1,-3276.8) [-3276.8|3276.7] "°/s²" MoTeC_M1,ECU
+
 
 CM_ BU_ Arduino_Dyno "Arduino-based engine dynamometer controller";
 CM_ BU_ MoTeC_M1 "MoTeC M1 Engine Control Unit";
 CM_ BU_ ECU "Generic Engine Control Unit";
 
 CM_ BO_ 768 "Dyno telemetry data transmitted at 10Hz containing engine RPM, torque, force measurements, brake servo position and system status flags";
+
+CM_ BO_ 769 "Optical dyno telemetry data transmitted at 10Hz containing rear wheel torque calculated from roller inertia, rear wheel RPM, roller RPM, and angular acceleration measurements from optical sensor";
 
 CM_ SG_ 768 Engine_RPM "Engine RPM measured from flywheel via hall sensor with gear ratio compensation";
 CM_ SG_ 768 Torque "Engine torque calculated from load cell pressure sensor measurement in Newton-meters";
@@ -60,6 +68,11 @@ CM_ SG_ 768 Hall_Sensor_Active "Hall sensor signal status: 0=No signal, 1=Active
 CM_ SG_ 768 RPM_Source_Serial "RPM target source: 0=Potentiometer, 1=Serial override";
 CM_ SG_ 768 PID_Active "PID controller status: 0=Manual, 1=Automatic";
 CM_ SG_ 768 Status_Reserved "Reserved status bits for future use";
+
+CM_ SG_ 769 Rear_Wheel_Torque "Rear wheel torque calculated from roller inertia and angular acceleration in Newton-meters (T = F × R)";
+CM_ SG_ 769 Rear_Wheel_RPM "Calculated rear wheel RPM based on roller RPM and radius ratio";
+CM_ SG_ 769 Roller_RPM "Dyno roller RPM calculated from optical sensor flywheel measurement with gear ratio";
+CM_ SG_ 769 Angular_Acceleration "Roller angular acceleration in °/s² calculated from rate of change of angular velocity";
 
 BA_DEF_ "BusType" STRING ;
 BA_DEF_ "ProtocolType" STRING ;
